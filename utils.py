@@ -40,6 +40,7 @@ def extraer_nombre_e_imagen(url):
         meta_imagen = soup.find("meta", property="og:image")
         imagen = meta_imagen["content"] if meta_imagen else None
         
+        # Limpieza básica para evitar ruidos en el análisis
         titulo_limpio = titulo.split('|')[0].split('-')[0].strip()
         return titulo_limpio, imagen
     except Exception as e:
@@ -49,7 +50,6 @@ def extraer_nombre_e_imagen(url):
 def investigar_mejor_oferta(url_original):
     """
     Coordina la limpieza (IA/Manual) y realiza búsquedas en cascada.
-    Si el término de la IA no da resultados, usa el respaldo del analizador.
     """
     nombre_sucio, foto_original = extraer_nombre_e_imagen(url_original)
     
@@ -65,20 +65,27 @@ def investigar_mejor_oferta(url_original):
     
     intentos_busqueda = []
     
-    # 1. Intentar con IA
+    # 1. Intentar con IA (Gemma 3 27b)
     termino_ia = ia_local.analizar_con_ia(nombre_sucio)
     if termino_ia:
-        termino_ia = re.sub(r'[^\w\s]', '', termino_ia).strip()
-        intentos_busqueda.append({"termino": termino_ia, "fuente": f"Gemma 3 (IA)"})
-        debug_info["ia_activa"] = True
+        # Normalizar: Solo letras, números y espacios
+        termino_ia = re.sub(r'[^a-zA-Z0-9\s]', '', termino_ia).strip()
+        if len(termino_ia) > 3:
+            intentos_busqueda.append({"termino": termino_ia, "fuente": "Gemma 3 (IA)"})
+            debug_info["ia_activa"] = True
     
-    # 2. Respaldo con Analizador de Reglas (Manual)
+    # 2. Respaldo con Analizador de Reglas
     termino_manual = analizador.limpiar_titulo(nombre_sucio)
-    termino_manual = re.sub(r'[^\w\s]', '', termino_manual).strip()
+    termino_manual = re.sub(r'[^a-zA-Z0-9\s]', '', termino_manual).strip()
     
-    # Solo lo añadimos si es diferente al de la IA
-    if termino_manual not in [i["termino"] for i in intentos_busqueda]:
+    # Solo añadir si es útil y diferente al de la IA
+    if termino_manual and termino_manual not in [i["termino"] for i in intentos_busqueda]:
         intentos_busqueda.append({"termino": termino_manual, "fuente": "Analizador (Reglas)"})
+
+    # 3. Caso especial: Si no hay nada, usar el inicio del título sucio (último recurso)
+    if not intentos_busqueda:
+        recorte = " ".join(nombre_sucio.split()[:3])
+        intentos_busqueda.append({"termino": recorte, "fuente": "Recorte Directo"})
 
     # --- FASE 2: EJECUCIÓN EN CASCADA ---
     for idx, intento in enumerate(intentos_busqueda):
@@ -86,7 +93,8 @@ def investigar_mejor_oferta(url_original):
         fuente = intento["fuente"]
         
         print(f"   [API] Intento {idx+1}: Buscando '{termino}' ({fuente})...")
-        
+        debug_info["termino_usado"] = termino # Actualizar para el reporte de Telegram
+
         endpoint = "https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.product.query/" + APP_KEY
         params = {
             "app_key": APP_KEY,
@@ -104,19 +112,22 @@ def investigar_mejor_oferta(url_original):
         try:
             response = requests.get(endpoint, params=params, timeout=12)
             data = response.json()
-            productos = data.get("aliexpress_affiliate_product_query_response", {}).get("resp_result", {}).get("result", {}).get("products", [])
+            
+            # Navegación segura del JSON
+            query_res = data.get("aliexpress_affiliate_product_query_response", {})
+            resp_result = query_res.get("resp_result", {})
+            result_obj = resp_result.get("result", {})
+            productos = result_obj.get("products", [])
             
             debug_info["total_encontrados"] = len(productos)
-            debug_info["termino_usado"] = termino
 
-            # --- FASE 3: FILTRADO INTELIGENTE ---
+            # --- FASE 3: FILTRADO ---
             for p in productos:
                 precio = float(p.get('target_sale_price', 0))
                 envio = float(p.get('target_shipping_fee', 0))
                 
                 if precio > 0:
-                    # Mejora: Si el producto es > 15 USD, somos un poco más flexibles con el envío (15%)
-                    # Si es < 15 USD, mantenemos el 10% estricto.
+                    # Umbral flexible: 15% para productos caros, 10% para baratos
                     umbral = 0.15 if precio > 15 else 0.10
                     
                     if envio <= (precio * umbral):
@@ -130,11 +141,11 @@ def investigar_mejor_oferta(url_original):
                             "fuente_exito": fuente
                         }, debug_info
             
-            print(f"   [API] Intento {idx+1} sin ofertas que cumplan el envío bajo.")
+            print(f"   [API] Intento {idx+1} ({fuente}) sin ofertas válidas.")
             
         except Exception as e:
-            print(f"   [API Error] Intento {idx+1} falló: {e}")
+            print(f"   [API Error] Fallo en intento {idx+1}: {e}")
             debug_info["error"] = str(e)
 
-    # Si llega aquí, es que ningún intento funcionó
+    # Si ningún intento devolvió producto
     return None, debug_info
