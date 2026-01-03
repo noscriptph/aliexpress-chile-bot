@@ -1,106 +1,57 @@
 import os
-import time
-import hashlib
-import requests
 import telebot
 from dotenv import load_dotenv
+import utils          # Lógica de API y búsqueda
+import scraper_fotos  # Lógica de fotos reales de clientes
 
-# Cargar credenciales desde el archivo .env
 load_dotenv()
-APP_KEY = os.getenv("ALI_APP_KEY")
-APP_SECRET = os.getenv("ALI_APP_SECRET")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TRACKING_ID = "telegram_chile_bot"
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-def obtener_firma(params):
-    """
-    Algoritmo de firma oficial de AliExpress.
-    Ordena los parámetros alfabéticamente y los cifra con el Secret.
-    """
-    # Ordenar parámetros alfabéticamente
-    sorted_params = sorted(params.items())
-    # Concatenar: Secret + LlaveValor + Secret
-    query_string = "".join(f"{k}{v}" for k, v in sorted_params)
-    sign_str = f"{APP_SECRET}{query_string}{APP_SECRET}"
-    # Devolver MD5 en mayúsculas
-    return hashlib.md5(sign_str.encode("utf-8")).hexdigest().upper()
-
-def consultar_producto(link_original):
-    """
-    Usa la API 'aliexpress.affiliate.link.generate' para convertir el link.
-    """
-    # URL de la API de AliExpress
-    endpoint = "https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.getPromotionLinks/" + APP_KEY
-    
-    # Parámetros básicos requeridos por la API
-    params = {
-        "app_key": APP_KEY,
-        "format": "json",
-        "method": "aliexpress.affiliate.link.generate",
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "v": "2.0",
-        "sign_method": "md5",
-        "promotion_link_type": "0",
-        "source_values": link_original,
-        "tracking_id": TRACKING_ID
-    }
-    
-    # Añadir la firma calculada
-    params["sign"] = obtener_firma(params)
-    
-    try:
-        response = requests.get(endpoint, params=params)
-        data = response.json()
-        
-        # Extraer el link de la respuesta JSON
-        # Estructura típica: response -> resp_result -> result -> promot_links -> [0]
-        res_list = data.get("aliexpress_affiliate_link_generate_response", {}).get("resp_result", {}).get("result", {}).get("promot_links", [])
-        
-        if res_list:
-            return res_list[0]
-        else:
-            # Si la API no devuelve nada, intentamos extraer el link limpio si viene en otro formato
-            return link_original
-            
-    except Exception as e:
-        print(f"Error en API AliExpress: {e}")
-        return link_original
+bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    # Usamos HTML para evitar errores de parseo
-    texto_bienvenida = (
-        "<b>🇨🇱 Bot AliExpress Chile conectado.</b>\n\n"
-        "Envíame un link de producto para generar tu link de afiliado."
-    )
-    bot.reply_to(message, texto_bienvenida, parse_mode="HTML")
+    bot.reply_to(message, "<b>🇨🇱 Investigador de Ofertas Chile</b>\nEnvíame un link y buscaré la mejor opción con envío barato y fotos reales.", parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: "aliexpress.com" in m.text or "s.click.aliexpress.com" in m.text)
-def handle_aliexpress_link(message):
+@bot.message_handler(func=lambda m: "aliexpress.com" in m.text)
+def handle_link(message):
     bot.send_chat_action(message.chat.id, 'typing')
+    url_usuario = message.text
     
-    link_original = message.text
-    link_convertido = consultar_producto(link_original)
+    # 1. Investigar la mejor oferta mediante API (en utils.py)
+    resultado = utils.investigar_mejor_oferta(url_usuario)
     
-    # Construcción del mensaje con HTML
-    texto = (
-        "<b>🔥 OFERTA SELECCIONADA 🔥</b>\n\n"
-        f"🔗 <b>Link:</b> {link_convertido}\n\n"
-        "✅ Envío validado para Chile."
-    )
-    
-    try:
-        bot.reply_to(message, texto, parse_mode="HTML")
-    except Exception as e:
-        print(f"Error enviando mensaje: {e}")
-        # Si falla el HTML, envía texto plano para no dejar al usuario esperando
-        bot.reply_to(message, f"Oferta lista:\n{link_convertido}")
+    if resultado:
+        # 2. Buscar fotos reales de clientes (en scraper_fotos.py)
+        # Usamos el link que el bot encontró para que las fotos coincidan con la oferta
+        datos_visuales = scraper_fotos.obtener_fotos_reales(resultado['link'])
+        
+        caption = (
+            f"<b>🔥 MEJOR OPCIÓN ENCONTRADA 🔥</b>\n\n"
+            f"📦 <b>Producto:</b> {resultado['titulo'][:50]}...\n"
+            f"💰 <b>Precio:</b> ${resultado['precio']}\n"
+            f"🚚 <b>Envío:</b> Validado &lt; 10%\n\n"
+            f"🔗 <b>Link:</b> <a href='{resultado['link']}'>Ver en AliExpress</a>"
+        )
+        
+        # Enviamos la oferta principal
+        bot.send_photo(message.chat.id, resultado['foto'], caption=caption, parse_mode="HTML")
+
+        # 3. Si hay fotos de reseñas, las enviamos en un grupo (álbum)
+        if datos_visuales['resenas']:
+            bot.send_chat_action(message.chat.id, 'upload_photo')
+            media_group = []
+            for i, url_foto in enumerate(datos_visuales['resenas']):
+                # Limitamos a 4 fotos para no saturar
+                if i < 4:
+                    media_group.append(telebot.types.InputMediaPhoto(url_foto))
+            
+            if media_group:
+                bot.send_message(message.chat.id, "📸 <b>Fotos reales de compradores:</b>", parse_mode="HTML")
+                bot.send_media_group(message.chat.id, media_group)
+    else:
+        bot.reply_to(message, "No encontré una mejor oferta con envío &lt; 10% para Chile, pero puedes intentar con otro producto.")
 
 if __name__ == "__main__":
     print("---------------------------------------")
-    print("Servidor local iniciado. Esperando mensajes...")
-    print("Presiona Ctrl+C para detener el bot.")
+    print("Bot con Búsqueda e Imágenes iniciado...")
     print("---------------------------------------")
     bot.polling(none_stop=True)
