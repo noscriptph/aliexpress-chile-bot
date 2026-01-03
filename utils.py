@@ -40,7 +40,6 @@ def extraer_nombre_e_imagen(url):
         meta_imagen = soup.find("meta", property="og:image")
         imagen = meta_imagen["content"] if meta_imagen else None
         
-        # Limpieza básica para evitar ruidos en el análisis
         titulo_limpio = titulo.split('|')[0].split('-')[0].strip()
         return titulo_limpio, imagen
     except Exception as e:
@@ -49,7 +48,7 @@ def extraer_nombre_e_imagen(url):
 
 def investigar_mejor_oferta(url_original):
     """
-    Coordina la limpieza (IA/Manual) y realiza búsquedas en cascada.
+    Coordina la limpieza y realiza búsquedas en cascada con filtrado dinámico para Chile.
     """
     nombre_sucio, foto_original = extraer_nombre_e_imagen(url_original)
     
@@ -62,27 +61,23 @@ def investigar_mejor_oferta(url_original):
 
     # --- FASE 1: GENERAR TÉRMINOS DE BÚSQUEDA ---
     print(f"   [Proceso] Analizando: '{nombre_sucio[:50]}...'")
-    
     intentos_busqueda = []
     
-    # 1. Intentar con IA (Gemma 3 27b)
+    # 1. Intentar con IA (Gemma 3)
     termino_ia = ia_local.analizar_con_ia(nombre_sucio)
     if termino_ia:
-        # Normalizar: Solo letras, números y espacios
         termino_ia = re.sub(r'[^a-zA-Z0-9\s]', '', termino_ia).strip()
-        if len(termino_ia) > 3:
+        if len(termino_ia) > 2:
             intentos_busqueda.append({"termino": termino_ia, "fuente": "Gemma 3 (IA)"})
             debug_info["ia_activa"] = True
     
     # 2. Respaldo con Analizador de Reglas
     termino_manual = analizador.limpiar_titulo(nombre_sucio)
     termino_manual = re.sub(r'[^a-zA-Z0-9\s]', '', termino_manual).strip()
-    
-    # Solo añadir si es útil y diferente al de la IA
     if termino_manual and termino_manual not in [i["termino"] for i in intentos_busqueda]:
         intentos_busqueda.append({"termino": termino_manual, "fuente": "Analizador (Reglas)"})
 
-    # 3. Caso especial: Si no hay nada, usar el inicio del título sucio (último recurso)
+    # 3. Failsafe: Recorte directo
     if not intentos_busqueda:
         recorte = " ".join(nombre_sucio.split()[:3])
         intentos_busqueda.append({"termino": recorte, "fuente": "Recorte Directo"})
@@ -93,7 +88,7 @@ def investigar_mejor_oferta(url_original):
         fuente = intento["fuente"]
         
         print(f"   [API] Intento {idx+1}: Buscando '{termino}' ({fuente})...")
-        debug_info["termino_usado"] = termino # Actualizar para el reporte de Telegram
+        debug_info["termino_usado"] = termino
 
         endpoint = "https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.product.query/" + APP_KEY
         params = {
@@ -113,24 +108,29 @@ def investigar_mejor_oferta(url_original):
             response = requests.get(endpoint, params=params, timeout=12)
             data = response.json()
             
-            # Navegación segura del JSON
-            query_res = data.get("aliexpress_affiliate_product_query_response", {})
-            resp_result = query_res.get("resp_result", {})
-            result_obj = resp_result.get("result", {})
-            productos = result_obj.get("products", [])
+            res_root = data.get("aliexpress_affiliate_product_query_response", {})
+            productos = res_root.get("resp_result", {}).get("result", {}).get("products", [])
             
             debug_info["total_encontrados"] = len(productos)
 
-            # --- FASE 3: FILTRADO ---
+            # --- FASE 3: FILTRADO CON CURVA DE FLEXIBILIDAD (CHILE) ---
             for p in productos:
                 precio = float(p.get('target_sale_price', 0))
                 envio = float(p.get('target_shipping_fee', 0))
                 
                 if precio > 0:
-                    # Umbral flexible: 15% para productos caros, 10% para baratos
-                    umbral = 0.15 if precio > 15 else 0.10
+                    es_valido = False
+                    # Regla para productos baratos (Compensa el envío base a Chile)
+                    if precio < 10:
+                        if envio <= 3.8: es_valido = True
+                    # Regla para gama media
+                    elif 10 <= precio <= 35:
+                        if envio <= (precio * 0.28): es_valido = True
+                    # Regla para productos caros (Más estricta)
+                    else:
+                        if envio <= (precio * 0.15): es_valido = True
                     
-                    if envio <= (precio * umbral):
+                    if es_valido:
                         print(f"      [Check] Encontrado: ${precio} USD (Envío: ${envio}) - CUMPLE con {fuente}")
                         return {
                             "link": p['promotion_link'],
@@ -141,11 +141,10 @@ def investigar_mejor_oferta(url_original):
                             "fuente_exito": fuente
                         }, debug_info
             
-            print(f"   [API] Intento {idx+1} ({fuente}) sin ofertas válidas.")
+            print(f"   [API] Intento {idx+1} ({fuente}) sin ofertas que pasen el filtro dinámico.")
             
         except Exception as e:
             print(f"   [API Error] Fallo en intento {idx+1}: {e}")
             debug_info["error"] = str(e)
 
-    # Si ningún intento devolvió producto
     return None, debug_info
