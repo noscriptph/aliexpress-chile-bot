@@ -30,4 +30,41 @@ echo ======================================================
 echo   SISTEMA ACTIVO - REVISA LAS VENTANAS EMERGENTES
 echo ======================================================
 echo Pulsa cualquier tecla para cerrar este lanzador...
-pause > nul
+pause > nul@echo off
+title SISTEMA DE OFERTAS ALIEXPRESS - CHILE
+color 0B
+
+echo ======================================================
+echo   INICIANDO ECOSISTEMA DE OFERTAS (IA + BOT + AUTO)
+echo ======================================================
+
+:: 1. Intentar iniciar Ollama de forma segura
+echo [1/3] Preparando Servidor Ollama...
+:: Verificamos si responde el comando antes de intentar lanzarlo
+ollama --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [!] El comando 'ollama' no se reconoce. 
+    echo [!] Intentando lanzarlo desde la ruta por defecto...
+    start "Servidor Ollama" /min "%LocalAppData%\Ollama\ollama.exe" serve
+) else (
+    echo [!] Ollama detectado. Asegurando que el servicio este activo...
+    start "Servidor Ollama" /min ollama serve
+)
+
+:: Pausa un poco más larga para que la IA cargue
+timeout /t 8
+
+:: 2. Iniciar el Bot de Respuestas
+echo [2/3] Iniciando Bot de Telegram...
+start "Bot Telegram" cmd /k "python bot.py"
+
+:: 3. Iniciar el Cazador Automatico
+echo [3/3] Iniciando Centro de Control (Cazador Auto)...
+start "Cazador Auto" cmd /k "python cazador_auto.py"
+
+echo.
+echo ======================================================
+echo   SISTEMA ACTIVO - REVISA LAS VENTANAS ABIERTAS
+echo ======================================================
+timeout /t 5
+exit
