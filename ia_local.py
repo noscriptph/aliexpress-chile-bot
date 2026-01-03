@@ -4,53 +4,51 @@ import re
 
 def analizar_con_ia(titulo_sucio):
     """
-    Usa Ollama y Gemma 3 para extraer la esencia del producto.
-    Si Ollama no responde, devuelve None para activar el respaldo local.
+    Usa Gemma 3 27b. Dado que el modelo corre parcialmente en RAM DDR5,
+    hemos ampliado el tiempo de espera para evitar errores de conexión.
     """
-    # Prompt ultra-optimizado: Instrucciones claras en inglés suelen funcionar 
-    # mejor con modelos pequeños como 4b para tareas de extracción.
+    # Prompt optimizado para máxima brevedad
     prompt = (
-        f"You are an e-commerce expert. Extract ONLY the main product name from the title. "
-        f"Remove quantities, voltages, and marketing words. Maximum 3 words. "
-        f"Do not explain, do not use punctuation.\n\n"
-        f"Title: \"{titulo_sucio}\"\n"
+        f"You are an e-commerce specialist. Extract ONLY the generic product name. "
+        f"Strict rules: No brands, no numbers, no technical specs. Max 3 words.\n"
+        f"Title: {titulo_sucio}\n"
         f"Product Name:"
     )
     
     try:
-        # Configuración para gemma3:4b
         payload = {
-            "model": "gemma3:4b", 
+            "model": "gemma3:27b",
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.1,  # Máxima precisión, mínima creatividad
-                "num_predict": 12,    # Suficiente para 3-4 palabras
-                "top_p": 0.9
+                "temperature": 0.1,
+                "num_predict": 15,
+                "num_thread": 8  # Aprovecha tus núcleos de CPU para ayudar a la RAM DDR5
             }
         }
         
-        # Timeout de 7 segundos: si la IA no responde rápido, pasamos al analizador.py
-        response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=7)
+        # URL exacta de Ollama (127.0.0.1 es más estable que localhost en Windows)
+        url_ollama = "http://127.0.0.1:11434/api/generate"
+        
+        # TIMEOUT: Subimos a 45 segundos. 
+        # Al usar 32GB de RAM DDR5 en lugar de solo VRAM, el primer token puede tardar.
+        response = requests.post(url_ollama, json=payload, timeout=45)
         
         if response.status_code == 200:
             resultado = response.json()
             nombre_ia = resultado.get("response", "").strip()
             
-            # --- LIMPIEZA DE SEGURIDAD ---
-            # Removemos comillas, puntos finales y saltos de línea indeseados
+            # Limpieza profunda de caracteres que puedan romper la API de AliExpress
             nombre_ia = nombre_ia.replace('"', '').replace("'", "").replace("\n", "")
-            nombre_ia = re.sub(r'[.\!\?]', '', nombre_ia) # Quita signos de puntuación
+            nombre_ia = re.sub(r'[.\!\?]', '', nombre_ia)
             
-            # Si la IA devuelve algo vacío o muy corto, devolvemos None para usar respaldo
-            if not nombre_ia or len(nombre_ia) < 2:
-                return None
-                
-            return nombre_ia
-        
+            # Validación de seguridad: si la IA devuelve basura o nada, activar respaldo
+            if nombre_ia and len(nombre_ia) >= 3:
+                return nombre_ia
+            
         return None
 
     except Exception as e:
-        # Reporte silencioso en consola para el usuario
-        print(f"   [IA Status] Offline o no disponible. Usando respaldo de reglas...")
+        # Imprime el error para que podamos verlo en la ventana negra del bot
+        print(f"   [IA Debug] Error con Gemma 27b: {e}")
         return None
