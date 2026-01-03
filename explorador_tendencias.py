@@ -4,34 +4,49 @@ import re
 
 def obtener_keywords_tendencia():
     """
-    Scrapea la sección de más vendidos o busca términos populares.
+    Scrapea tendencias y aplica un filtro de calidad para keywords de búsqueda.
     """
     print("   [Explorador] Buscando tendencias actuales en AliExpress...")
     tendencias = []
     
-    # URL de productos en oferta relámpago o más vendidos
     url = "https://es.aliexpress.com/w/wholesale-top-selling-products.html"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Language": "es-CL,es;q=0.9"
+    }
+
+    # Lista de respaldo inteligente con productos de alta demanda en Chile (2025-2026)
+    lista_respaldo = [
+        "Consola R36S Retro", "SSD NVMe 1TB Kingston", "Teclado Mecánico RGB", 
+        "Proyector Magcubic Hy300", "Power Bank Baseus 65W", "Smartwatch Amoled",
+        "Audífonos Lenovo LP40", "Mouse Gaming Inalámbrico", "Cargador GaN 65W"
+    ]
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return lista_respaldo
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Buscamos títulos de productos en la página de resultados
-        # AliExpress usa diferentes clases, pero los h3 suelen contener los nombres
         titulos = soup.find_all('h3')
         
         for t in titulos:
             texto = t.get_text().strip()
-            # Limpiamos el texto para que sean keywords útiles (3-4 palabras)
-            limpio = " ".join(texto.split()[:4])
-            if len(limpio) > 10 and limpio not in tendencias:
-                tendencias.append(limpio)
-        
-        # Si el scraping falla por bloqueos, devolvemos una lista de respaldo sólida
-        if not tendencias:
-            return ["Consola R36S", "SSD NVMe 1TB", "Teclado Mecánico RGB", "Proyector Magcubic Hy300", "Power Bank Baseus"]
+            # Limpieza: Eliminamos símbolos raros y números de series largos
+            limpio = re.sub(r'[^\w\s]', '', texto)
+            palabras = limpio.split()[:4] # Tomamos las primeras 4 palabras
+            keyword = " ".join(palabras)
             
-        return tendencias[:15] # Retornamos las primeras 15 tendencias halladas
-    except:
-        return ["Consola R36S", "SSD NVMe 1TB", "Teclado Mecánico RGB", "Proyector Magcubic Hy300", "Power Bank Baseus"]
+            # Filtro: Evitar palabras basura del sitio
+            palabras_basura = ['envío', 'gratis', 'aliexpress', 'oficial', 'tienda', 'nuevo']
+            if any(basura in keyword.lower() for basura in palabras_basura):
+                continue
+
+            if len(keyword) > 10 and keyword not in tendencias:
+                tendencias.append(keyword)
+        
+        return tendencias[:15] if tendencias else lista_respaldo
+        
+    except Exception as e:
+        print(f"   [Explorador] Error de conexión: {e}. Usando lista de respaldo.")
+        return lista_respaldo
