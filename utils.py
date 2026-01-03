@@ -3,6 +3,7 @@ import time
 import requests
 import os
 import re
+import json # Necesario para el modo debug
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import analizador
@@ -27,7 +28,6 @@ def extraer_nombre_e_imagen(url):
             "Accept-Language": "es-CL,es;q=0.9"
         }
         
-        # MANEJO DE LINKS CORTOS (s.click / a.aliexpress)
         if "aliexpress.com" in url and ("/e/" in url or "s.click" in url):
             print("   [Utils] Siguiendo redirección de link corto...")
             r_head = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
@@ -62,14 +62,11 @@ def investigar_mejor_oferta(entrada, callback_status=None):
         "error": None
     }
 
-    # --- FASE 1: OBTENCIÓN DE KEYWORDS ---
     intentos_keywords = []
 
     if es_url:
-        # Lógica para URL (Telegram)
         nombre_sucio, foto_original, url_real = extraer_nombre_e_imagen(entrada)
         
-        # 1. IA
         termino_ia = ia_local.analizar_con_ia(nombre_sucio)
         if termino_ia:
             termino_ia = re.sub(r'[^a-zA-Z0-9\s]', '', termino_ia).strip()
@@ -77,20 +74,16 @@ def investigar_mejor_oferta(entrada, callback_status=None):
                 intentos_keywords.append({"termino": termino_ia, "fuente": "Gemma 3 (IA)"})
                 debug_info["ia_activa"] = True
         
-        # 2. Analizador de Reglas
         termino_reglas = analizador.limpiar_titulo(nombre_sucio)
         if termino_reglas and termino_reglas not in [i["termino"] for i in intentos_keywords]:
             intentos_keywords.append({"termino": termino_reglas, "fuente": "Analizador (Reglas)"})
 
-        # 3. Failsafe
         if not intentos_keywords:
             recorte = " ".join(nombre_sucio.split()[:3])
             intentos_keywords.append({"termino": recorte, "fuente": "Recorte Directo"})
     else:
-        # Lógica para Texto Directo (Cazador)
         intentos_keywords.append({"termino": entrada, "fuente": "Búsqueda Directa"})
 
-    # --- FASE 2: BÚSQUEDA MULTI-NIVEL ---
     niveles = [
         ("Premium", 0.12, 2.5),
         ("Estándar Chile", 0.28, 4.2),
@@ -120,10 +113,23 @@ def investigar_mejor_oferta(entrada, callback_status=None):
             try:
                 response = requests.get(endpoint, params=params, timeout=12)
                 data = response.json()
-                res_root = data.get("aliexpress_affiliate_product_query_response", {})
-                productos = res_root.get("resp_result", {}).get("result", {}).get("products", [])
                 
+                # --- MODO INSPECCIÓN DE DATOS RECIBIDOS (Vemos si la API responde) ---
+                print(f"\n[API DEBUG] Respuesta para: '{termino}' ({nombre_nivel})")
+                # Imprime el JSON completo para ver errores de AliExpress o falta de stock
+                # print(json.dumps(data, indent=2)) 
+
+                res_root = data.get("aliexpress_affiliate_product_query_response", {})
+                
+                # Si la API reporta un error de firma o similar, lo atrapamos aquí
+                if "error_response" in data:
+                    err_msg = data["error_response"].get("msg", "Error desconocido")
+                    print(f"   [!] Error API: {err_msg}")
+                    continue
+
+                productos = res_root.get("resp_result", {}).get("result", {}).get("products", [])
                 debug_info["total_encontrados"] = len(productos)
+                print(f"   [Info] Encontrados: {len(productos)} candidatos.")
 
                 for p in productos:
                     precio = float(p.get('target_sale_price', 0))
