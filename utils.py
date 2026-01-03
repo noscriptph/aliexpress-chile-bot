@@ -31,7 +31,6 @@ def extraer_nombre_e_imagen(url):
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Intentamos obtener el título del OpenGraph o del Title tag
         meta_titulo = soup.find("meta", property="og:title")
         if meta_titulo:
             titulo = meta_titulo["content"]
@@ -41,9 +40,7 @@ def extraer_nombre_e_imagen(url):
         meta_imagen = soup.find("meta", property="og:image")
         imagen = meta_imagen["content"] if meta_imagen else None
         
-        # Limpiamos el título de separadores comunes
         titulo_limpio = titulo.split('|')[0].split('-')[0].strip()
-        
         return titulo_limpio, imagen
     except Exception as e:
         print(f"   [Error Web] Fallo al extraer datos base: {e}")
@@ -51,8 +48,8 @@ def extraer_nombre_e_imagen(url):
 
 def investigar_mejor_oferta(url_original):
     """
-    Coordina la limpieza (IA/Manual) y la búsqueda en la API.
-    Retorna: (datos_producto, info_debug)
+    Coordina la limpieza (IA/Manual) y realiza búsquedas en cascada.
+    Si el término de la IA no da resultados, usa el respaldo del analizador.
     """
     nombre_sucio, foto_original = extraer_nombre_e_imagen(url_original)
     
@@ -62,73 +59,82 @@ def investigar_mejor_oferta(url_original):
         "total_encontrados": 0,
         "error": None
     }
-    
-    # 1. Intentar limpiar con IA Local (Gemma 3)
+
+    # --- FASE 1: GENERAR TÉRMINOS DE BÚSQUEDA ---
     print(f"   [Proceso] Analizando: '{nombre_sucio[:50]}...'")
-    termino = ia_local.analizar_con_ia(nombre_sucio)
     
-    if termino:
-        print(f"   [IA] Gemma 3 identificó: '{termino}'")
+    intentos_busqueda = []
+    
+    # 1. Intentar con IA
+    termino_ia = ia_local.analizar_con_ia(nombre_sucio)
+    if termino_ia:
+        termino_ia = re.sub(r'[^\w\s]', '', termino_ia).strip()
+        intentos_busqueda.append({"termino": termino_ia, "fuente": f"Gemma 3 (IA)"})
         debug_info["ia_activa"] = True
-    else:
-        print("   [IA] Offline o Error. Activando Analizador de reglas...")
-        termino = analizador.limpiar_titulo(nombre_sucio)
     
-    # Limpieza final del término para la API (quitar puntuación residual)
-    termino = re.sub(r'[^\w\s]', '', termino).strip()
-    debug_info["termino_usado"] = termino
-
-    # 2. Configuración de API AliExpress
-    print(f"   [API] Buscando mejores precios para '{termino}' en Chile...")
-    endpoint = "https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.product.query/" + APP_KEY
+    # 2. Respaldo con Analizador de Reglas (Manual)
+    termino_manual = analizador.limpiar_titulo(nombre_sucio)
+    termino_manual = re.sub(r'[^\w\s]', '', termino_manual).strip()
     
-    params = {
-        "app_key": APP_KEY,
-        "format": "json",
-        "method": "aliexpress.affiliate.product.query",
-        "keywords": termino,
-        "ship_to_country": "CL",
-        "sort": "VOLUME_HIGH",  # Priorizamos los más vendidos (más confiables)
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "v": "2.0",
-        "sign_method": "md5"
-    }
-    params["sign"] = obtener_firma(params)
+    # Solo lo añadimos si es diferente al de la IA
+    if termino_manual not in [i["termino"] for i in intentos_busqueda]:
+        intentos_busqueda.append({"termino": termino_manual, "fuente": "Analizador (Reglas)"})
 
-    try:
-        response = requests.get(endpoint, params=params, timeout=12)
-        data = response.json()
+    # --- FASE 2: EJECUCIÓN EN CASCADA ---
+    for idx, intento in enumerate(intentos_busqueda):
+        termino = intento["termino"]
+        fuente = intento["fuente"]
         
-        # Navegación en el JSON de respuesta
-        res_root = data.get("aliexpress_affiliate_product_query_response", {})
-        resp_result = res_root.get("resp_result", {})
-        result = resp_result.get("result", {})
-        productos = result.get("products", [])
+        print(f"   [API] Intento {idx+1}: Buscando '{termino}' ({fuente})...")
         
-        debug_info["total_encontrados"] = len(productos)
+        endpoint = "https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.product.query/" + APP_KEY
+        params = {
+            "app_key": APP_KEY,
+            "format": "json",
+            "method": "aliexpress.affiliate.product.query",
+            "keywords": termino,
+            "ship_to_country": "CL",
+            "sort": "VOLUME_HIGH",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "v": "2.0",
+            "sign_method": "md5"
+        }
+        params["sign"] = obtener_firma(params)
 
-        # 3. Filtrado por la "Regla del 10%"
-        for p in productos:
-            precio = float(p.get('target_sale_price', 0))
-            envio = float(p.get('target_shipping_fee', 0))
+        try:
+            response = requests.get(endpoint, params=params, timeout=12)
+            data = response.json()
+            productos = data.get("aliexpress_affiliate_product_query_response", {}).get("resp_result", {}).get("result", {}).get("products", [])
             
-            # Solo consideramos productos con precio válido
-            if precio > 0:
-                # El envío debe ser menor o igual al 10% del precio del producto
-                if envio <= (precio * 0.10):
-                    print(f"      [Check] Encontrado: ${precio} USD | Envío: ${envio} (CUMPLE)")
-                    return {
-                        "link": p['promotion_link'],
-                        "precio": precio,
-                        "envio": envio,
-                        "foto": p['product_main_image_url'],
-                        "titulo": p['product_title']
-                    }, debug_info
-        
-        print("   [API] Sin resultados que cumplan el criterio de envío bajo.")
-        return None, debug_info
+            debug_info["total_encontrados"] = len(productos)
+            debug_info["termino_usado"] = termino
 
-    except Exception as e:
-        print(f"   [API Error] {e}")
-        debug_info["error"] = str(e)
-        return None, debug_info
+            # --- FASE 3: FILTRADO INTELIGENTE ---
+            for p in productos:
+                precio = float(p.get('target_sale_price', 0))
+                envio = float(p.get('target_shipping_fee', 0))
+                
+                if precio > 0:
+                    # Mejora: Si el producto es > 15 USD, somos un poco más flexibles con el envío (15%)
+                    # Si es < 15 USD, mantenemos el 10% estricto.
+                    umbral = 0.15 if precio > 15 else 0.10
+                    
+                    if envio <= (precio * umbral):
+                        print(f"      [Check] Encontrado: ${precio} USD (Envío: ${envio}) - CUMPLE con {fuente}")
+                        return {
+                            "link": p['promotion_link'],
+                            "precio": precio,
+                            "envio": envio,
+                            "foto": p['product_main_image_url'],
+                            "titulo": p['product_title'],
+                            "fuente_exito": fuente
+                        }, debug_info
+            
+            print(f"   [API] Intento {idx+1} sin ofertas que cumplan el envío bajo.")
+            
+        except Exception as e:
+            print(f"   [API Error] Intento {idx+1} falló: {e}")
+            debug_info["error"] = str(e)
+
+    # Si llega aquí, es que ningún intento funcionó
+    return None, debug_info
